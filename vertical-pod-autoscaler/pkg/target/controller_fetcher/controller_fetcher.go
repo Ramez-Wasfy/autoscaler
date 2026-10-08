@@ -83,6 +83,7 @@ type ControllerFetcher interface {
 }
 
 type controllerFetcher struct {
+	kubeClient                   kube_client.Interface
 	scaleNamespacer              scale.ScalesGetter
 	mapper                       apimeta.RESTMapper
 	informersMap                 map[wellKnownController]cache.SharedIndexInformer
@@ -138,6 +139,7 @@ func NewControllerFetcher(config *rest.Config, kubeClient kube_client.Interface,
 
 	scaleNamespacer := scale.New(restClient, mapper, dynamic.LegacyAPIPathResolverFunc, resolver)
 	return &controllerFetcher{
+		kubeClient:                   kubeClient,
 		scaleNamespacer:              scaleNamespacer,
 		mapper:                       mapper,
 		informersMap:                 informersMap,
@@ -197,6 +199,21 @@ func (f *controllerFetcher) getParentOfController(ctx context.Context, controlle
 	kind := wellKnownController(controllerKey.Kind)
 	informer, exists := f.informersMap[kind]
 	if exists {
+		// A new ReplicaSet can be absent from this replica's informer when its
+		// first pod is admitted. Resolve only that cache miss through the API.
+		if kind == replicaSet && f.kubeClient != nil {
+			_, cached, err := informer.GetStore().GetByKey(controllerKey.Namespace + "/" + controllerKey.Name)
+			if err != nil {
+				return nil, err
+			}
+			if !cached {
+				rs, err := f.kubeClient.AppsV1().ReplicaSets(controllerKey.Namespace).Get(ctx, controllerKey.Name, metav1.GetOptions{})
+				if err != nil {
+					return nil, err
+				}
+				return getOwnerController(rs.OwnerReferences, controllerKey.Namespace), nil
+			}
+		}
 		return getParentOfWellKnownController(informer, controllerKey)
 	}
 
